@@ -5,10 +5,11 @@
   "main": "index.js",
   "type": "module",
   "bin": {
-    "redmine-mcp-server": "./index.js"
+    "redmine-mcp-server": "index.js"
   },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test"
   },
   "keywords": [
     "mcp",
@@ -41,7 +42,8 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^4.6.7"
   },
   "files": [
     "index.js",

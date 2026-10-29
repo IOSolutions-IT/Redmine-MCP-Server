@@ -239,6 +239,7 @@ Add to `claude_desktop_config.json`:
 | `create_issue` | Create a new issue (auto-assigns user, auto-sets dates) |
 | `update_issue` | Update status, done%, notes, assignee (auto-sets dates) |
 | `create_or_update_issue` | **Smart upsert** — find by subject, update or create |
+| `upload_attachment` | Upload a local file (screenshot, log, HAR, PDF…) and attach it to an issue |
 
 ### User Detection
 
@@ -251,8 +252,12 @@ Add to `claude_desktop_config.json`:
 | Tool | Description |
 |------|-------------|
 | `start_timer` | Start a timer when beginning work on an issue |
-| `stop_timer` | Stop the timer and log elapsed time to Redmine |
+| `stop_timer` | Stop the timer and log elapsed time to Redmine (optional `hours` overrides the elapsed time) |
+| `cancel_timer` | Discard a running timer without logging anything |
 | `log_time` | Manually log hours spent on an issue |
+| `list_time_entries` | List time entries filtered by issue, project, user (`"me"`), and date range |
+| `update_time_entry` | Change hours, activity, comment, date, or issue of a time entry |
+| `delete_time_entry` | Delete a time entry |
 | `list_time_entry_activities` | List available activity types (Development, Design…) |
 
 ---
@@ -303,6 +308,7 @@ Call `start_timer` when work begins and `stop_timer` when done. The elapsed time
 | `REDMINE_USER_ID` | ❌ | Override: directly set the Redmine user ID |
 | `REDMINE_USER_EMAIL` | ❌ | Override: match by email instead of auto-detection |
 | `REDMINE_AUTO_DATES` | ❌ | Auto-set start/due dates on status change (default: `"true"`) |
+| `REDMINE_DEFAULT_ACTIVITY_ID` | ❌ | Activity ID for time entries logged without `activity_id`. If unset, Redmine's default activity is used; if there is none, the tool returns an error listing the available activities |
 
 ---
 

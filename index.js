@@ -16,15 +16,17 @@
  *   REDMINE_USER_EMAIL   - Override email for user detection (optional)
  *   REDMINE_USER_ID      - Override Redmine user ID directly (optional)
  *   REDMINE_AUTO_DATES   - Auto-set start/due dates on status change (default: "true")
+ *   REDMINE_DEFAULT_ACTIVITY_ID - Activity ID for time entries logged without one (optional)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { execSync } from "child_process";
-import { readFileSync } from "fs";
+import { readFileSync, realpathSync, statSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { basename, extname, join } from "path";
+import { fileURLToPath } from "url";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -126,6 +128,10 @@ async function redminePut(path, body) {
     method: "PUT",
     body: JSON.stringify(body),
   });
+}
+
+async function redmineDelete(path) {
+  return redmineRequest(path, { method: "DELETE" });
 }
 
 // ─── User Detection ──────────────────────────────────────────────────────────
@@ -234,6 +240,45 @@ async function findRedmineUser(localUser) {
 
 const activeTimers = new Map();
 
+let cachedDefaultActivityId = null;
+
+/**
+ * Resolve the activity for a time entry when the caller did not pass one:
+ * explicit value → REDMINE_DEFAULT_ACTIVITY_ID → Redmine's is_default activity
+ * (cached per process). Throws with the available activities if none applies.
+ */
+async function resolveActivityId(activityId) {
+  if (activityId) return activityId;
+
+  const envValue = process.env.REDMINE_DEFAULT_ACTIVITY_ID;
+  if (envValue) {
+    const parsed = Number(envValue);
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new Error(
+        `REDMINE_DEFAULT_ACTIVITY_ID must be a positive integer, got "${envValue}".`
+      );
+    }
+    return parsed;
+  }
+
+  if (cachedDefaultActivityId) return cachedDefaultActivityId;
+
+  const data = await redmineGet("/enumerations/time_entry_activities.json");
+  const activities = data.time_entry_activities || [];
+  const defaultActivity = activities.find((a) => a.is_default);
+  if (defaultActivity) {
+    cachedDefaultActivityId = defaultActivity.id;
+    return cachedDefaultActivityId;
+  }
+
+  const available = activities.length
+    ? activities.map((a) => `${a.id}: ${a.name}`).join(", ")
+    : "none found";
+  throw new Error(
+    `No activity_id given and Redmine has no default time entry activity. Pass activity_id or set REDMINE_DEFAULT_ACTIVITY_ID. Available activities: ${available}`
+  );
+}
+
 // ─── MCP Server ──────────────────────────────────────────────────────────────
 
 const server = new McpServer({
@@ -333,6 +378,13 @@ server.tool(
       .string()
       .optional()
       .describe("Override the description for the time entry"),
+    hours: z
+      .number()
+      .positive()
+      .optional()
+      .describe(
+        "Hours to log instead of the elapsed time (e.g., 1.5). The timer is still cleared."
+      ),
   },
   async (params) => {
     try {
@@ -351,7 +403,8 @@ server.tool(
       const elapsedMs = Date.now() - timer.startTime;
       const elapsedHours = Math.round((elapsedMs / 3600000) * 100) / 100;
       const elapsedMinutes = Math.round(elapsedMs / 60000);
-      const hoursToLog = Math.max(0.01, elapsedHours);
+      const hoursToLog = params.hours ?? Math.max(0.01, elapsedHours);
+      const activityId = await resolveActivityId(params.activity_id);
 
       const localUser = detectLocalUser();
       const redmineUser = await findRedmineUser(localUser);
@@ -364,11 +417,8 @@ server.tool(
           timer.description ||
           "Work performed via AI agent",
         spent_on: todayISO(),
+        activity_id: activityId,
       };
-
-      if (params.activity_id) {
-        timeEntry.activity_id = params.activity_id;
-      }
 
       if (redmineUser) {
         timeEntry.user_id = redmineUser.id;
@@ -381,18 +431,57 @@ server.tool(
       const userInfo = redmineUser
         ? ` (logged for ${redmineUser.firstname} ${redmineUser.lastname})`
         : "";
+      const durationInfo =
+        params.hours !== undefined
+          ? `override; timer ran ${elapsedMinutes} minutes`
+          : `${elapsedMinutes} minutes`;
 
       return {
         content: [
           {
             type: "text",
-            text: `⏱ Timer stopped for issue #${params.issue_id}. Logged ${hoursToLog}h (${elapsedMinutes} minutes)${userInfo} on ${todayISO()}.`,
+            text: `⏱ Timer stopped for issue #${params.issue_id}. Logged ${hoursToLog}h (${durationInfo})${userInfo} on ${todayISO()}.`,
           },
         ],
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${err.message}` }] };
     }
+  }
+);
+
+// ── Tool: cancel_timer ───────────────────────────────────────────────────────
+
+server.tool(
+  "cancel_timer",
+  "Cancel the running timer for an issue WITHOUT logging any time to Redmine. The elapsed time is discarded.",
+  {
+    issue_id: z.number().describe("The Redmine issue ID whose timer to cancel"),
+  },
+  async (params) => {
+    const timer = activeTimers.get(params.issue_id);
+    if (!timer) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No active timer found for issue #${params.issue_id}. Nothing to cancel.`,
+          },
+        ],
+      };
+    }
+
+    activeTimers.delete(params.issue_id);
+    const elapsedMinutes = Math.round((Date.now() - timer.startTime) / 60000);
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `⏱ Timer cancelled for issue #${params.issue_id}. Discarded ${elapsedMinutes} minutes; nothing was logged.`,
+        },
+      ],
+    };
   }
 );
 
@@ -422,6 +511,7 @@ server.tool(
   },
   async (params) => {
     try {
+      const activityId = await resolveActivityId(params.activity_id);
       const localUser = detectLocalUser();
       const redmineUser = await findRedmineUser(localUser);
 
@@ -430,9 +520,9 @@ server.tool(
         hours: params.hours,
         comments: params.description || "Work performed via AI agent",
         spent_on: params.spent_on || todayISO(),
+        activity_id: activityId,
       };
 
-      if (params.activity_id) timeEntry.activity_id = params.activity_id;
       if (redmineUser) timeEntry.user_id = redmineUser.id;
 
       await redminePost("/time_entries.json", { time_entry: timeEntry });
@@ -471,6 +561,132 @@ server.tool(
             text: JSON.stringify(data.time_entry_activities || [], null, 2),
           },
         ],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// ── Tool: list_time_entries ──────────────────────────────────────────────────
+
+server.tool(
+  "list_time_entries",
+  "List time entries, optionally filtered by issue, project, user, and date range.",
+  {
+    issue_id: z.number().optional().describe("Filter by issue ID"),
+    project_id: z
+      .union([z.string(), z.number()])
+      .optional()
+      .describe("Filter by project ID or identifier"),
+    user_id: z
+      .union([z.number(), z.literal("me")])
+      .optional()
+      .describe('Filter by user ID, or "me" for the API key owner'),
+    from: z.string().optional().describe("Start date (YYYY-MM-DD), inclusive"),
+    to: z.string().optional().describe("End date (YYYY-MM-DD), inclusive"),
+    limit: z
+      .number()
+      .optional()
+      .describe("Max results (default 25, max 100)"),
+  },
+  async (params) => {
+    try {
+      const query = new URLSearchParams();
+      if (params.issue_id) query.set("issue_id", String(params.issue_id));
+      if (params.project_id) query.set("project_id", String(params.project_id));
+      if (params.user_id) query.set("user_id", String(params.user_id));
+      if (params.from) query.set("from", params.from);
+      if (params.to) query.set("to", params.to);
+      query.set("limit", String(params.limit || 25));
+
+      const data = await redmineGet(`/time_entries.json?${query.toString()}`);
+      const entries = (data.time_entries || []).map((e) => ({
+        id: e.id,
+        issue: e.issue?.id ?? null,
+        user: e.user?.name ?? null,
+        activity: e.activity?.name ?? null,
+        hours: e.hours,
+        comments: e.comments,
+        spent_on: e.spent_on,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Found ${data.total_count ?? entries.length} time entries (showing ${entries.length}):\n\n${JSON.stringify(entries, null, 2)}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// ── Tool: update_time_entry ──────────────────────────────────────────────────
+
+server.tool(
+  "update_time_entry",
+  "Update an existing time entry. Pass at least one field to change.",
+  {
+    id: z.number().describe("The time entry ID"),
+    hours: z.number().positive().optional().describe("New hours value"),
+    activity_id: z.number().optional().describe("New activity ID"),
+    comments: z.string().optional().describe("New comment"),
+    spent_on: z.string().optional().describe("New date (YYYY-MM-DD)"),
+    issue_id: z.number().optional().describe("Move the entry to another issue"),
+  },
+  async (params) => {
+    try {
+      const timeEntry = {};
+      for (const key of ["hours", "activity_id", "comments", "spent_on", "issue_id"]) {
+        if (params[key] !== undefined) timeEntry[key] = params[key];
+      }
+
+      if (Object.keys(timeEntry).length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Error: Nothing to update. Pass at least one of hours, activity_id, comments, spent_on, issue_id.",
+            },
+          ],
+        };
+      }
+
+      await redminePut(`/time_entries/${params.id}.json`, {
+        time_entry: timeEntry,
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Updated time entry #${params.id}: ${Object.keys(timeEntry).join(", ")}.`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
+// ── Tool: delete_time_entry ──────────────────────────────────────────────────
+
+server.tool(
+  "delete_time_entry",
+  "Permanently delete a time entry.",
+  {
+    id: z.number().describe("The time entry ID to delete"),
+  },
+  async (params) => {
+    try {
+      await redmineDelete(`/time_entries/${params.id}.json`);
+      return {
+        content: [{ type: "text", text: `Deleted time entry #${params.id}.` }],
       };
     } catch (err) {
       return { content: [{ type: "text", text: `Error: ${err.message}` }] };
@@ -956,6 +1172,13 @@ server.tool(
         };
       }
 
+      // Resolve the time entry activity before any write so a missing
+      // default activity fails fast instead of after the issue is changed.
+      const activityId =
+        params.hours_spent && params.hours_spent > 0
+          ? await resolveActivityId()
+          : null;
+
       // Detect user
       const localUser = detectLocalUser();
       const redmineUser = await findRedmineUser(localUser);
@@ -1063,6 +1286,7 @@ server.tool(
           hours: params.hours_spent,
           comments: params.notes || "Work performed via AI agent",
           spent_on: todayISO(),
+          activity_id: activityId,
         };
         if (redmineUser) timeEntry.user_id = redmineUser.id;
 
@@ -1088,7 +1312,99 @@ server.tool(
   }
 );
 
+// ── Tool: upload_attachment ──────────────────────────────────────────────────
+
+const CONTENT_TYPES = {
+  ".gif": "image/gif",
+  ".har": "application/json",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".json": "application/json",
+  ".log": "text/plain",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".txt": "text/plain",
+  ".zip": "application/zip",
+};
+
+server.tool(
+  "upload_attachment",
+  "Upload a local file (screenshot, log, HAR, PDF…) and attach it to an issue.",
+  {
+    issue_id: z.number().describe("The Redmine issue ID to attach the file to"),
+    file_path: z.string().describe("Path of the local file to upload"),
+    description: z.string().optional().describe("Attachment description"),
+    filename: z
+      .string()
+      .optional()
+      .describe("Filename shown in Redmine (default: the file's basename)"),
+  },
+  async (params) => {
+    try {
+      let stats;
+      try {
+        stats = statSync(params.file_path);
+      } catch {
+        stats = null;
+      }
+      if (!stats || !stats.isFile()) {
+        return {
+          content: [
+            { type: "text", text: `Error: File not found: ${params.file_path}` },
+          ],
+        };
+      }
+
+      const filename = params.filename || basename(params.file_path);
+      const bytes = readFileSync(params.file_path);
+
+      const uploaded = await redmineRequest(
+        `/uploads.json?filename=${encodeURIComponent(filename)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: bytes,
+        }
+      );
+
+      const upload = { token: uploaded.upload.token, filename };
+      if (params.description) upload.description = params.description;
+      const contentType = CONTENT_TYPES[extname(filename).toLowerCase()];
+      if (contentType) upload.content_type = contentType;
+
+      await redminePut(`/issues/${params.issue_id}.json`, {
+        issue: { uploads: [upload] },
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Attached "${filename}" (${stats.size} bytes) to issue #${params.issue_id}: ${REDMINE_URL}/issues/${params.issue_id}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Error: ${err.message}` }] };
+    }
+  }
+);
+
 // ── Start server ─────────────────────────────────────────────────────────────
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+export { server };
+
+// Start stdio only when run directly (node index.js, npx bin symlink), so tests
+// can import the server without taking over stdin/stdout.
+function isMainModule() {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
