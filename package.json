@@ -1,6 +1,6 @@
 {
   "name": "@oaxapps/redmine-mcp-server",
-  "version": "1.2.6",
+  "version": "1.3.0",
   "description": "MCP Server for Redmine — integrate Claude Code, Antigravity, Cursor, Windsurf, and other AI tools with your self-hosted Redmine instance",
   "main": "index.js",
   "type": "module",
