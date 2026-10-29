@@ -1,0 +1,51 @@
+{
+  "name": "@oaxapps/redmine-mcp-server",
+  "version": "1.2.5",
+  "description": "MCP Server for Redmine — integrate Claude Code, Antigravity, Cursor, Windsurf, and other AI tools with your self-hosted Redmine instance",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "redmine-mcp-server": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "mcp",
+    "redmine",
+    "model-context-protocol",
+    "claude-code",
+    "antigravity",
+    "cursor",
+    "windsurf",
+    "opencode",
+    "ai-tools",
+    "project-management",
+    "issue-tracker",
+    "self-hosted"
+  ],
+  "author": "",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IOSolutions-IT/Redmine-MCP-Server.git"
+  },
+  "homepage": "https://github.com/IOSolutions-IT/Redmine-MCP-Server#readme",
+  "bugs": {
+    "url": "https://github.com/IOSolutions-IT/Redmine-MCP-Server/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ]
+}
